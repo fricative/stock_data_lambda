@@ -7,13 +7,11 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Hashtable;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
+import java.util.TreeMap;
 
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
@@ -21,15 +19,11 @@ import com.google.gson.Gson;
 
 public class GetStockData implements RequestHandler<HashMap<String, Object>, GetStockDataResponse> {
 
-    private static final Set<String> allowedFields() {
-        Set<String> fields = new HashSet<String>();
-        Collections.addAll(fields, "ff_sales", "ff_net_income", "ff_oper_cf", "ff_receiv_turn_days");
-        return fields;
-    }
+    Connection conn = null;
 
     public GetStockDataResponse handleRequest(HashMap<String, Object> input, Context context) {
         try {
-            Map<String, String> event = (Map<String, String>)input.get("queryStringParameters");
+            Map<String, String> event = (Map<String, String>) input.get("queryStringParameters");
             if (!event.containsKey("ticker"))
                 return new GetStockDataResponse(200, new HashMap<String, String>(), "missing ticker parameter", false);
             if (!event.containsKey("field"))
@@ -41,28 +35,29 @@ public class GetStockData implements RequestHandler<HashMap<String, Object>, Get
             if (ticker.contains(",")) {
                 String[] ts = ticker.split(",");
                 for (String t : ts)
-                    if (t.length() < 10) // to prevent SQL injection, make sure ticker's length < 10
-                        tickers.add(t);
+                    tickers.add(t);
             } else
                 tickers.add(ticker);
             String query_fields = event.get("field");
             List<String> fields = new ArrayList<String>();
-            Set<String> supportedFields = allowedFields();
             for (String f : query_fields.split(","))
-                if (supportedFields.contains(f))
-                    fields.add(f.toLowerCase());
+                fields.add(f.toLowerCase());
 
             String url = System.getenv("database");
             String user = System.getenv("database_user");
             String password = System.getenv("database_password");
-            Connection conn = DriverManager.getConnection(url, user, password);
-            String result = retreive(tickers, fields, period, conn);
-            System.out.println(result);
-            conn.close();
+            this.conn = DriverManager.getConnection(url, user, password);
+            String result = retreive(tickers, fields, period, this.conn);
             return new GetStockDataResponse(200, new HashMap<String, String>(), result, false);
         } catch (SQLException e) {
             e.printStackTrace();
             return null;
+        } finally {
+            if (this.conn != null)
+                try {
+                    this.conn.close();
+                } catch (Exception e) {
+                }
         }
     }
 
@@ -90,6 +85,7 @@ public class GetStockData implements RequestHandler<HashMap<String, Object>, Get
                 TableMap.put(TableName, new ArrayList<String>());
             TableMap.get(TableName).add(FieldName);
         }
+        stmt.close();
         return TableMap;
     }
 
@@ -98,9 +94,8 @@ public class GetStockData implements RequestHandler<HashMap<String, Object>, Get
         // retrieve field-table map from metadata table
         Hashtable<String, List<String>> fieldTableMap = GetMapTable(fields, period, conn);
 
-        HashMap<String, HashMap<String, HashMap<String, String>>> result = new HashMap<String, HashMap<String, HashMap<String, String>>>();
+        HashMap<String, TreeMap<String, HashMap<String, String>>> result = new HashMap<String, TreeMap<String, HashMap<String, String>>>();
         for (String table_name : fieldTableMap.keySet()) {
-
             StringBuilder field_param = new StringBuilder();
             field_param.append("ticker_region as ticker, date,");
             for (int i = 0; i < fieldTableMap.get(table_name).size(); i++)
@@ -129,17 +124,16 @@ public class GetStockData implements RequestHandler<HashMap<String, Object>, Get
                 for (int i = 3; i <= numColumns; i++) {
                     String column_name = rsmd.getColumnName(i);
                     String value = rs.getString(column_name);
-                    if (value != null && value.contains(".")) // rounding to 3 decimal places
-                        value = value.substring(0, value.indexOf(".") + 3);
                     rowData.put(column_name, value);
                 }
                 if (!result.containsKey(ticker))
-                    result.put(ticker, new HashMap<String, HashMap<String, String>>());
+                    result.put(ticker, new TreeMap<String, HashMap<String, String>>());
                 if (!result.get(ticker).containsKey(date))
                     result.get(ticker).put(date, rowData);
                 else
                     result.get(ticker).get(date).putAll(rowData);
             }
+            stmt.close();
         }
         return new Gson().toJson(result);
     }
